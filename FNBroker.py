@@ -1,28 +1,27 @@
-from typing import Union  # Объединение типов
 import collections
-from datetime import datetime
 import logging
+from datetime import datetime
+from typing import Union  # Объединение типов
 
 from backtrader import BrokerBase, Order, BuyOrder, SellOrder
 from backtrader.position import Position
 from backtrader.utils.py3 import with_metaclass
+from google.protobuf.json_format import MessageToDict
 
 from BackTraderFinam import FNStore, FNData
-
 from FinamPy.proto.common_pb2 import BUY_SELL_BUY, BUY_SELL_SELL, OrderValidBefore, OrderValidBeforeType
+from FinamPy.proto.events_pb2 import OrderEvent, PortfolioEvent, TradeEvent
 from FinamPy.proto.orders_pb2 import OrderStatus
 from FinamPy.proto.stops_pb2 import StopLoss, StopQuantity, StopQuantityUnits
-from FinamPy.proto.events_pb2 import OrderEvent, PortfolioEvent
 
 
-# noinspection PyArgumentList
 class MetaFNBroker(BrokerBase.__class__):
     def __init__(self, name, bases, dct):
+        # noinspection PyArgumentList
         super(MetaFNBroker, self).__init__(name, bases, dct)  # Инициализируем класс брокера
         FNStore.BrokerCls = self  # Регистрируем класс брокера в хранилище Финам
 
 
-# noinspection PyProtectedMember,PyArgumentList,PyUnusedLocal
 class FNBroker(with_metaclass(MetaFNBroker, BrokerBase)):
     """Брокер Финам"""
     logger = logging.getLogger('FNBroker')  # Будем вести лог
@@ -39,7 +38,8 @@ class FNBroker(with_metaclass(MetaFNBroker, BrokerBase)):
         self.pcs = collections.defaultdict(collections.deque)  # Очередь всех родительских/дочерних заявок (Parent - Children)
 
         self.store.provider.on_order = self.on_order  # Обработка заявок
-        # self.store.provider.on_portfolio = self.on_portfolio  # Обработка портфеля
+        self.store.provider.on_trade = self.on_trade  # Обработка трейдов
+        self.store.provider.on_portfolio = self.on_portfolio  # Обработка портфеля
         self.order_trade_request_id = self.store.provider.subscribe_order_trade(list(self.store.provider.client_ids))  # Подписываемся на заявки/сделки по счету
         # TODO Ждем подписку на портфель
 
@@ -85,14 +85,24 @@ class FNBroker(with_metaclass(MetaFNBroker, BrokerBase)):
 
     def buy(self, owner, data, size, price=None, plimit=None, exectype=None, valid=None, tradeid=0, oco=None, trailamount=None, trailpercent=None, parent=None, transmit=True, **kwargs):
         """Заявка на покупку"""
-        order = self.create_order(owner, data, size, price, plimit, exectype, valid, oco, parent, transmit, is_buy=True, **kwargs)
-        self.notifs.append(order.clone())  # Уведомляем брокера о принятии/отклонении заявки на бирже
+        if trailamount is not None:
+            raise NotImplementedError('trailamount is not supported')
+        if trailpercent is not None:
+            raise NotImplementedError('trailpercent is not supported')
+
+        order = self.create_order(owner, data, size, price, plimit, exectype, valid, tradeid, oco, parent, transmit, is_buy=True, **kwargs)
+        # self.notifs.append(order.clone())  # Уведомляем брокера о принятии/отклонении заявки на бирже
         return order
 
     def sell(self, owner, data, size, price=None, plimit=None, exectype=None, valid=None, tradeid=0, oco=None, trailamount=None, trailpercent=None, parent=None, transmit=True, **kwargs):
         """Заявка на продажу"""
-        order = self.create_order(owner, data, size, price, plimit, exectype, valid, oco, parent, transmit, is_buy=False, **kwargs)
-        self.notifs.append(order.clone())  # Уведомляем брокера о принятии/отклонении заявки на бирже
+        if trailamount is not None:
+            raise NotImplementedError('trailamount is not supported')
+        if trailpercent is not None:
+            raise NotImplementedError('trailpercent is not supported')
+
+        order = self.create_order(owner, data, size, price, plimit, exectype, valid, tradeid, oco, parent, transmit, is_buy=False, **kwargs)
+        # self.notifs.append(order.clone())  # Уведомляем брокера о принятии/отклонении заявки на бирже
         return order
 
     def cancel(self, order):
@@ -145,40 +155,51 @@ class FNBroker(with_metaclass(MetaFNBroker, BrokerBase)):
         """
         return next((order for order in self.orders.values() if order.info['transaction_id'] == transaction_id), None)
 
-    def create_order(self, owner, data: FNData, size, price=None, plimit=None, exectype=None, valid=None, oco=None, parent=None, transmit=True, simulated=False, is_buy=True, **kwargs):
+    def create_order(self, owner, data: FNData, size, price=None, plimit=None, exectype=None, valid=None, tradeid=0, oco: Order = None, parent=None, transmit=True, simulated=False, is_buy=True, **kwargs):
         """Создание заявки. Привязка параметров счета и тикера. Обработка связанных и родительской/дочерних заявок
         Даполнительные параметры передаются через **kwargs:
         - account_id - Порядковый номер счета
         """
-        order = BuyOrder(owner=owner, data=data, size=size, price=price, pricelimit=plimit, exectype=exectype, valid=valid, oco=oco, parent=parent, simulated=simulated, transmit=transmit) if is_buy \
-            else SellOrder(owner=owner, data=data, size=size, price=price, pricelimit=plimit, exectype=exectype, valid=valid, oco=oco, parent=parent, simulated=simulated, transmit=transmit)  # Заявка на покупку/продажу
+        # noinspection PyArgumentList
+        if is_buy:
+            order = BuyOrder(owner=owner, data=data, size=size, price=price, pricelimit=plimit, exectype=exectype, valid=valid, tradeid=tradeid, oco=oco, parent=parent, simulated=simulated, transmit=transmit)
+        else:
+            order = SellOrder(owner=owner, data=data, size=size, price=price, pricelimit=plimit, exectype=exectype, valid=valid, tradeid=tradeid, oco=oco, parent=parent, simulated=simulated, transmit=transmit)
+
         order.addcomminfo(self.getcommissioninfo(data))  # По тикеру выставляем комиссии в заявку. Нужно для исполнения заявки в BackTrader
         order.addinfo(**kwargs)  # Передаем в заявку все дополнительные параметры, в т.ч. account_id
+
         if order.exectype in (Order.Close, Order.StopTrail, Order.StopTrailLimit, Order.Historical):  # Эти типы заявок не реализованы
-            self.logger.warning(f'Постановка заявки {order.ref} по тикеру {data.board}.{data.symbol} отклонена. Работа с заявками {order.exectype} не реализована')
+            self.logger.error(f'Постановка заявки {order.ref} по тикеру {data.board}.{data.symbol} отклонена. Работа с заявками {order.exectype} не реализована')
             order.reject(self)  # то отклоняем заявку
+            self.notifs.append(order.clone())
             self.oco_pc_check(order)  # Проверяем связанные и родительскую/дочерние заявки
             return order  # Возвращаем отклоненную заявку
         client_id = self.store.provider.client_ids[order.info['account_id']] if 'account_id' in order.info else data.client_id  # Торговый счет из заявки/тикера
         order.addinfo(client_id=client_id)  # Сохраняем в заявке
         if order.exectype != Order.Market and not order.price:  # Если цена заявки не указана для всех заявок, кроме рыночной
             price_type = 'Лимитная' if order.exectype == Order.Limit else 'Стоп'  # Для стоп заявок это будет триггерная (стоп) цена
-            self.logger.warning(f'Постановка заявки {order.ref} по тикеру {data.board}.{data.symbol} отклонена. {price_type} цена (price) не указана для заявки типа {order.exectype}')
+            self.logger.error(f'Постановка заявки {order.ref} по тикеру {data.board}.{data.symbol} отклонена. {price_type} цена (price) не указана для заявки типа {order.exectype}')
             order.reject(self)  # то отклоняем заявку
+            self.notifs.append(order.clone())
             self.oco_pc_check(order)  # Проверяем связанные и родительскую/дочерние заявки
             return order  # Возвращаем отклоненную заявку
         if order.exectype == Order.StopLimit and not order.pricelimit:  # Если лимитная цена не указана для стоп-лимитной заявки
-            self.logger.warning(f'Постановка заявки {order.ref} по тикеру {data.board}.{data.symbol} отклонена. Лимитная цена (pricelimit) не указана для заявки типа {order.exectype}')
+            self.logger.error(f'Постановка заявки {order.ref} по тикеру {data.board}.{data.symbol} отклонена. Лимитная цена (pricelimit) не указана для заявки типа {order.exectype}')
             order.reject(self)  # то отклоняем заявку
+            self.notifs.append(order.clone())
             self.oco_pc_check(order)  # Проверяем связанные и родительскую/дочерние заявки
             return order  # Возвращаем отклоненную заявку
         if oco:  # Если есть связанная заявка
+            if order.ref in self.ocos and self.ocos[order.ref] != oco.ref:
+                raise NotImplementedError('oco groups not implemented')
             self.ocos[order.ref] = oco.ref  # то заносим в список связанных заявок
         if not transmit or parent:  # Для родительской/дочерних заявок
             parent_ref = getattr(order.parent, 'ref', order.ref)  # Номер транзакции родительской заявки или номер заявки, если родительской заявки нет
             if order.ref != parent_ref and parent_ref not in self.pcs:  # Если есть родительская заявка, но она не найдена в очереди родительских/дочерних заявок
-                self.logger.warning(f'Постановка заявки {order.ref} по тикеру {data.board}.{data.symbol} отклонена. Родительская заявка не найдена')
+                self.logger.error(f'Постановка заявки {order.ref} по тикеру {data.board}.{data.symbol} отклонена. Родительская заявка не найдена')
                 order.reject(self)  # то отклоняем заявку
+                self.notifs.append(order.clone())
                 self.oco_pc_check(order)  # Проверяем связанные и родительскую/дочерние заявки
                 return order  # Возвращаем отклоненную заявку
             pcs = self.pcs[parent_ref]  # В очередь к родительской заявке
@@ -203,10 +224,22 @@ class FNBroker(with_metaclass(MetaFNBroker, BrokerBase)):
         self.logger.debug(f'order.size={order.size}, si.lot_size={si.lot_size}, quantity={quantity}')  # Для отладки правильно установленного лота
         response = None  # Результат запроса
         if order.exectype == Order.Market:  # Рыночная заявка
-            response = self.store.provider.new_order(client_id, board, symbol, buy_sell, quantity)
+            # TODO: add valid_before from order.valid
+            if order.valid is not None:
+                raise NotImplementedError('Order.valid is not supported')
+            response = self.store.provider.new_order(
+                client_id, board, symbol, buy_sell, quantity,
+                valid_before=OrderValidBefore(type=OrderValidBeforeType.ORDER_VALID_BEFORE_TYPE_TILL_CANCELLED),
+            )
         elif order.exectype == Order.Limit:  # Лимитная заявка
             price = self.store.provider.price_to_finam_price(board, symbol, order.price)  # Лимитная цена
-            response = self.store.provider.new_order(client_id, board, symbol, buy_sell, quantity, price=price)
+            # TODO: add valid_before from order.valid
+            if order.valid is not None:
+                raise NotImplementedError('Order.valid is not supported')
+            response = self.store.provider.new_order(
+                client_id, board, symbol, buy_sell, quantity, price=price,
+                valid_before=OrderValidBefore(type=OrderValidBeforeType.ORDER_VALID_BEFORE_TYPE_TILL_CANCELLED),
+            )
         elif order.exectype == Order.Stop:  # Стоп заявка
             price = self.store.provider.price_to_finam_price(board, symbol, order.price)  # Стоп цена
             response = self.store.provider.new_stop(
@@ -223,15 +256,17 @@ class FNBroker(with_metaclass(MetaFNBroker, BrokerBase)):
         order.submit(self)  # Отправляем заявку на биржу (Order.Submitted)
         self.notifs.append(order.clone())  # Уведомляем брокера об отправке заявки на биржу
         if not response:  # Если при отправке заявки на биржу произошла веб ошибка
-            self.logger.warning(f'Постановка заявки по тикеру {board}.{symbol} отклонена. Ошибка веб сервиса')
+            # FIXME: Сюда заходить никогда не будем, т.к. я переделал на raise Error
+            self.logger.error(f'Постановка заявки по тикеру {board}.{symbol} отклонена. Ошибка веб сервиса')
             order.reject(self)  # то отклоняем заявку
+            self.notifs.append(order.clone())
             self.oco_pc_check(order)  # Проверяем связанные и родительскую/дочерние заявки
             return order  # Возвращаем отклоненную заявку
         if order.exectype in (Order.Market, Order.Limit):  # Для рыночной и лимитной заявки
             order.addinfo(transaction_id=response.transaction_id)  # Идентификатор транзакции добавляем в заявку
         elif order.exectype in (Order.Stop, Order.StopLimit):  # Для стоп и стоп-лимитной заявки
             order.addinfo(stop_id=response.stop_id)  # Идентификатор стоп заявки добавляем в заявку
-        order.accept(self)  # Заявка принята на бирже (Order.Accepted)
+        # order.accept(self)  # Заявка принята на бирже (Order.Accepted)
         self.orders[order.ref] = order  # Сохраняем заявку в списке заявок, отправленных на биржу
         return order  # Возвращаем заявку
 
@@ -283,24 +318,37 @@ class FNBroker(with_metaclass(MetaFNBroker, BrokerBase)):
             price = position.average_price * cross_rate  # Цена входа
             self.positions[(event.client_id, si.board, si.code)] = Position(size, price)  # Сохраняем в списке открытых позиций
 
+    def on_trade(self, event: TradeEvent):
+        pass
+
     def on_order(self, event: OrderEvent):
         """Обработка заявок"""
         order: Order = self.get_order(event.transaction_id)  # Пытаемся получить заявку по номеру транзакции
         if not order:  # Если заявки нет в BackTrader (не из автоторговли)
             return  # то выходим, дальше не продолжаем
+
+        order.addinfo(event=MessageToDict(event))
         if event.status == OrderStatus.ORDER_STATUS_NONE:  # Если заявка не выставлена
-            pass  # то ничего не делаем, т.к. это просто уведомление о том, что заявка принята
+            # order.submit(broker=self)
+            pass  # то ничего не делаем, т.к. это просто уведомление о том, что заявка принята брокером, не биржей
         elif event.status == OrderStatus.ORDER_STATUS_ACTIVE:  # Если заявка выставлена
+            if event.order_no:
+                order.accept(broker=self)   # заявка принята биржей и находится в стакане
+            else:
+                # TODO: перенести в place_order
+                # order.submit(broker=self)   # заявка отправлена на биржу, но не в стакане
+                pass
             pass  # то ничего не делаем, т.к. уведомили о выставлении заявки на этапе ее постановки
         elif event.status == OrderStatus.ORDER_STATUS_CANCELLED:  # Если заявка отменена
             if order.status == order.Canceled:  # Бывает, что Финам дублируем события отмены заявок. Если заявка уже была удалена
                 return  # то выходим, дальше не продолжаем
             order.cancel()  # Отменяем существующую заявку
-            self.notifs.append(order.clone())  # Уведомляем брокера об отмене заявки
+            # self.notifs.append(order.clone())  # Уведомляем брокера об отмене заявки
             self.oco_pc_check(order)  # Проверяем связанные и родительскую/дочерние заявки (Canceled)
         elif event.status == OrderStatus.ORDER_STATUS_MATCHED:  # Если заявка исполнена
             dt = self.store.provider.utc_to_msk_datetime(datetime.now())  # Перевод текущего времени (другого нет) в московское
             pos = self.getposition(order.data)  # Получаем позицию по тикеру или нулевую позицию если тикера в списке позиций нет
+            # TODO: add order.setposition ?
             board = order.data.board  # Код режима торгов
             symbol = order.data.symbol  # Тикер
             si = self.store.provider.get_symbol_info(board, symbol)  # Информация о тикере
@@ -309,14 +357,19 @@ class FNBroker(with_metaclass(MetaFNBroker, BrokerBase)):
                 size *= -1  # то кол-во ставим отрицательным
             price = event.price  # Цена исполнения за штуку
             psize, pprice, opened, closed = pos.update(size, price)  # Обновляем размер/цену позиции на размер/цену сделки
+            # TODO: add pnl
+            # TODO: add openedvalue, closedvalue ? это объём открытой и закрытой части позиции size * price
             order.execute(dt, size, price, closed, 0, 0, opened, 0, 0, 0, 0, psize, pprice)  # Исполняем заявку в BackTrader
             if order.executed.remsize:  # Если осталось что-то к исполнению
                 if order.status != order.Partial:  # Если заявка переходит в статус частичного исполнения (может исполняться несколькими частями)
                     order.partial()  # то заявка частично исполнена
-                    self.notifs.append(order.clone())  # Уведомляем брокера о частичном исполнении заявки
+                    # self.notifs.append(order.clone())  # Уведомляем брокера о частичном исполнении заявки
             else:  # Если ничего нет к исполнению
                 order.completed()  # то заявка полностью исполнена
-                self.notifs.append(order.clone())  # Уведомляем брокера о полном исполнении заявки
+                # self.notifs.append(order.clone())  # Уведомляем брокера о полном исполнении заявки
                 # Снимаем oco-заявку только после полного исполнения заявки
                 # Если нужно снять oco-заявку на частичном исполнении, то прописываем это правило в ТС
                 self.oco_pc_check(order)  # Проверяем связанные и родительскую/дочерние заявки (Completed)
+
+        # FIXME: надо делать один раз без всяких условий? Для этого мб удалить в других местах все self.notifs
+        self.notifs.append(order.clone())

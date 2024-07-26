@@ -1,5 +1,6 @@
-from collections import deque
 import logging
+from collections import deque, defaultdict
+from queue import Queue
 
 from backtrader.metabase import MetaParams
 from backtrader.utils.py3 import with_metaclass
@@ -38,11 +39,11 @@ class FNStore(with_metaclass(MetaSingleton, object)):
         """Возвращает новый экземпляр класса брокера с заданными параметрами"""
         return cls.BrokerCls(*args, **kwargs)
 
-    def __init__(self, provider=FinamPy()):
+    def __init__(self, provider=None):
         super(FNStore, self).__init__()
         self.notifs = deque()  # Уведомления хранилища
-        self.provider = provider  # Подключаемся ко всем торговым счетам
-        self.new_bars = []  # Новые бары по всем подпискам на тикеры из Финам
+        self.provider = provider or FinamPy()   # Подключаемся ко всем торговым счетам
+        self.new_bars = defaultdict(Queue)  # Новые бары по всем подпискам на тикеры из Финам
 
     def start(self):
         pass  # TODO Обработчик новых баров по подписке из Финам
