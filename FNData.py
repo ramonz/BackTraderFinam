@@ -115,20 +115,16 @@ class FNData(with_metaclass(MetaFNData, AbstractDataBase)):
             except queue.Empty:
                 return None
 
-            # self.last_bar_received = new_bars.qsize() == 1  # Если в хранилище остался 1 бар, то мы будем получать последний возможный бар
             self.last_bar_received = new_bars.qsize() == 0  # Если в хранилище не осталось баров, значит это последний бар
             if self.last_bar_received:  # Получаем последний возможный бар
                 self.logger.debug('Получение последнего возможного на данный момент бара')
 
-            # Бар из хранилища новых бар
-            bar = {
-                'datetime': (self.get_bar_open_date_time(new_bar)),
-                'open': self.store.provider.dict_decimal_to_float(new_bar['open']),
-                'high': self.store.provider.dict_decimal_to_float(new_bar['high']),
-                'low': self.store.provider.dict_decimal_to_float(new_bar['low']),
-                'close': self.store.provider.dict_decimal_to_float(new_bar['close']),
-                'volume': new_bar['volume'],
-            }
+            bar = dict(datetime=self.get_bar_open_date_time(new_bar),
+                       open=self.store.provider.finam_price_to_price(self.board, self.symbol, self.store.provider.dict_decimal_to_float(new_bar['open'])),
+                       high=self.store.provider.finam_price_to_price(self.board, self.symbol, self.store.provider.dict_decimal_to_float(new_bar['high'])),
+                       low=self.store.provider.finam_price_to_price(self.board, self.symbol, self.store.provider.dict_decimal_to_float(new_bar['low'])),
+                       close=self.store.provider.finam_price_to_price(self.board, self.symbol, self.store.provider.dict_decimal_to_float(new_bar['close'])),
+                       volume=int(new_bar['volume']))  # Бар из хранилища новых бар
             if not self.is_bar_valid(bar):  # Если бар не соответствует всем условиям выборки
                 return None  # то пропускаем бар, будем заходить еще
             self.logger.debug(f'Сохранение нового бара с {bar["datetime"].strftime(self.dt_format)} в файл')
@@ -141,12 +137,12 @@ class FNData(with_metaclass(MetaFNData, AbstractDataBase)):
                 self.live_mode = False  # Переходим в режим получения истории
 
         # Все проверки пройдены. Записываем полученный исторический/новый бар
-        self.lines.datetime[0] = date2num(bar['datetime'])  # DateTime
-        self.lines.open[0] = self.store.provider.finam_price_to_price(self.board, self.symbol, bar['open'])  # Open
-        self.lines.high[0] = self.store.provider.finam_price_to_price(self.board, self.symbol, bar['high'])  # High
-        self.lines.low[0] = self.store.provider.finam_price_to_price(self.board, self.symbol, bar['low'])  # Low
-        self.lines.close[0] = self.store.provider.finam_price_to_price(self.board, self.symbol, bar['close'])  # Close
-        self.lines.volume[0] = int(bar['volume'])  # Volume подается как строка. Его обязательно нужно привести к целому
+        self.lines.datetime[0] = date2num(bar['datetime'])
+        self.lines.open[0] = bar['open']
+        self.lines.high[0] = bar['high']
+        self.lines.low[0] = bar['low']
+        self.lines.close[0] = bar['close']
+        self.lines.volume[0] = bar['volume']
         self.lines.openinterest[0] = 0  # Открытый интерес в Финам не учитывается
         return True  # Будем заходить сюда еще
 
@@ -161,7 +157,7 @@ class FNData(with_metaclass(MetaFNData, AbstractDataBase)):
             self.put_notification(self.DISCONNECTED)  # Отправляем уведомление об окончании получения новых бар
         self.store.DataCls = None  # Удаляем класс данных в хранилище
 
-    # Получение бар
+    # Получение/сохранение бар
 
     def get_bars_from_file(self) -> None:
         """Получение бар из файла"""
@@ -224,11 +220,12 @@ class FNData(with_metaclass(MetaFNData, AbstractDataBase)):
                 if not response:  # Если в ответ ничего не получили
                     self.logger.warning('Ошибка запроса бар из истории')
                     return  # то выходим, дальше не продолжаем
-                else:  # Если в ответ пришли бары
-                    response_dict = MessageToDict(response, always_print_fields_with_no_presence=True)  # Переводим в словарь из JSON
-                    if 'candles' not in response_dict:  # Если бар нет в словаре
-                        self.logger.error(f'Бар (candles) нет в словаре {response_dict}')
-                        return  # то выходим, дальше не продолжаем
+
+                response_dict = MessageToDict(response, always_print_fields_with_no_presence=True)  # Переводим в словарь из JSON
+                if 'candles' not in response_dict:  # Если бар нет в словаре
+                    self.logger.error(f'Бар (candles) нет в словаре {response_dict}')
+                    return  # то выходим, дальше не продолжаем
+
                 new_bars_dict = response_dict['candles']  # Получаем все бары из Finam
                 if len(new_bars_dict) > 0:  # Если пришли новые бары
                     first_bar_open_dt = self.get_bar_open_date_time(new_bars_dict[0])  # Дату и время первого полученного бара переводим из UTC в МСК
@@ -236,17 +233,15 @@ class FNData(with_metaclass(MetaFNData, AbstractDataBase)):
                     self.logger.debug(f'Получены бары с {first_bar_open_dt} по {last_bar_open_dt}')
                     t = time.perf_counter()
                     for new_bar in new_bars_dict:  # Пробегаемся по всем полученным барам
-                        bar = {
-                            'datetime': self.get_bar_open_date_time(new_bar),
-                            'open': self.store.provider.dict_decimal_to_float(new_bar['open']),
-                            'high': self.store.provider.dict_decimal_to_float(new_bar['high']),
-                            'low': self.store.provider.dict_decimal_to_float(new_bar['low']),
-                            'close': self.store.provider.dict_decimal_to_float(new_bar['close']),
-                            'volume': new_bar['volume'],
-                        }
-                        self.save_bar_to_file(bar, writer=writer)  # Сохраняем бар в файл
+                        bar = dict(datetime=self.get_bar_open_date_time(new_bar),
+                                   open=self.store.provider.finam_price_to_price(self.board, self.symbol, self.store.provider.dict_decimal_to_float(histoy_bar['open'])),
+                                   high=self.store.provider.finam_price_to_price(self.board, self.symbol, self.store.provider.dict_decimal_to_float(histoy_bar['high'])),
+                                   low=self.store.provider.finam_price_to_price(self.board, self.symbol, self.store.provider.dict_decimal_to_float(histoy_bar['low'])),
+                                   close=self.store.provider.finam_price_to_price(self.board, self.symbol, self.store.provider.dict_decimal_to_float(histoy_bar['close'])),
+                                   volume=int(new_bar['volume']))  # Бар из и
                         if self.is_bar_valid(bar):  # Если исторический бар соответствует всем условиям выборки
                             self.history_bars.append(bar)  # то добавляем бар
+                            self.save_bar_to_file(bar, writer=writer)   # и сохраняем бар в файл
 
                     self.logger.debug(f'В файл {self.file_name} записано {len(new_bars_dict)} баров на {new_bars_dict[-1]["timestamp"]} {time.perf_counter() - t:.3f}s')
 
@@ -262,6 +257,36 @@ class FNData(with_metaclass(MetaFNData, AbstractDataBase)):
             self.logger.debug(f'Получено бар из истории: {len(self.history_bars) - file_history_bars_len} с {self.history_bars[file_history_bars_len]["datetime"].strftime(self.dt_format)} по {self.history_bars[-1]["datetime"].strftime(self.dt_format)}')
         else:  # Бары из истории не получены
             self.logger.debug('Из истории новых бар не получено')
+
+    def is_bar_valid(self, bar) -> bool:
+        """Проверка бара на соответствие условиям выборки"""
+        dt_open = bar['datetime']  # Дата и время открытия бара МСК
+        if dt_open <= self.dt_last_open:  # Если пришел бар из прошлого (дата открытия меньше последней даты открытия)
+            self.logger.debug(f'Дата/время открытия бара {dt_open} <= последней даты/времени открытия {self.dt_last_open}')
+            return False  # то бар не соответствует условиям выборки
+        if self.p.fromdate and dt_open < self.p.fromdate or self.p.todate and dt_open > self.p.todate:  # Если задан диапазон, а бар за его границами
+            # self.logger.debug(f'Дата/время открытия бара {dt_open} за границами диапазона {self.p.fromdate} - {self.p.todate}')
+            self.dt_last_open = dt_open  # Запоминаем дату/время открытия пришедшего бара для будущих сравнений
+            return False  # то бар не соответствует условиям выборки
+        if self.p.sessionstart != time.min and dt_open.time() < self.p.sessionstart:  # Если задано время начала сессии и открытие бара до этого времени
+            self.logger.debug(f'Дата/время открытия бара {dt_open} до начала торговой сессии {self.p.sessionstart}')
+            self.dt_last_open = dt_open  # Запоминаем дату/время открытия пришедшего бара для будущих сравнений
+            return False  # то бар не соответствует условиям выборки
+        dt_close = self.get_bar_close_date_time(dt_open)  # Дата и время закрытия бара
+        if self.p.sessionend != time(23, 59, 59, 999990) and dt_close.time() > self.p.sessionend:  # Если задано время окончания сессии и закрытие бара после этого времени
+            self.logger.debug(f'Дата/время открытия бара {dt_open} после окончания торговой сессии {self.p.sessionend}')
+            self.dt_last_open = dt_open  # Запоминаем дату/время открытия пришедшего бара для будущих сравнений
+            return False  # то бар не соответствует условиям выборки
+        if not self.p.four_price_doji and bar['high'] == bar['low']:  # Если не пропускаем дожи 4-х цен, но такой бар пришел
+            self.logger.debug(f'Бар {dt_open} - дожи 4-х цен')
+            self.dt_last_open = dt_open  # Запоминаем дату/время открытия пришедшего бара для будущих сравнений
+            return False  # то бар не соответствует условиям выборки
+        time_market_now = self.get_finam_date_time_now()  # Текущее биржевое время
+        if dt_close > time_market_now and time_market_now.time() < self.p.sessionend:  # Если время закрытия бара еще не наступило на бирже, и сессия еще не закончилась
+            self.logger.debug(f'Дата/время {dt_close} закрытия бара на {dt_open} еще не наступило')
+            return False  # то бар не соответствует условиям выборки
+        self.dt_last_open = dt_open  # Запоминаем дату/время открытия пришедшего бара для будущих сравнений
+        return True  # В остальных случаях бар соответствуем условиям выборки
 
     def stream_bars(self) -> None:
         """Поток получения новых бар по расписанию биржи"""
@@ -319,6 +344,17 @@ class FNData(with_metaclass(MetaFNData, AbstractDataBase)):
 
             self.store.new_bars[self.guid].put(bar)  # Добавляем в хранилище новых бар
 
+    def save_bar_to_file(self, bar, writer=None) -> None:
+        """Сохранение бара в конец файла"""
+        if writer is not None:
+            get_writer = contextlib.nullcontext(writer)
+        else:
+            get_writer = self._with_history_bars_file_writer()
+
+        with get_writer as writer:
+            row = _csv_row_from_bar(self.symbol, bar)
+            writer.writerow(row)  # Записываем бар в конец файла
+
     # Функции
 
     @staticmethod
@@ -329,11 +365,7 @@ class FNData(with_metaclass(MetaFNData, AbstractDataBase)):
         :param int compression: Размер временнОго интервала
         :return: Временной интервал Финам
         """
-        if timeframe == TimeFrame.Days:  # Дневной временной интервал (по умолчанию)
-            return DayCandleTimeFrame.DAYCANDLE_TIMEFRAME_D1
-        elif timeframe == TimeFrame.Weeks:  # Недельный временной интервал
-            return DayCandleTimeFrame.DAYCANDLE_TIMEFRAME_W1
-        elif timeframe == TimeFrame.Minutes:  # Минутный временной интервал
+        if timeframe == TimeFrame.Minutes:  # Минутный временной интервал
             if compression == 60:  # Часовой временной интервал
                 return IntradayCandleTimeFrame.INTRADAYCANDLE_TIMEFRAME_H1
             elif compression == 15:  # 15-и минутный временной интервал
@@ -342,8 +374,11 @@ class FNData(with_metaclass(MetaFNData, AbstractDataBase)):
                 return IntradayCandleTimeFrame.INTRADAYCANDLE_TIMEFRAME_M5
             elif compression == 1:  # 1 минутный временной интервал
                 return IntradayCandleTimeFrame.INTRADAYCANDLE_TIMEFRAME_M1
-        else:  # В остальных случаях
-            return DayCandleTimeFrame.DAYCANDLE_TIMEFRAME_D1  # возвращаем значение по умолчанию
+        elif timeframe == TimeFrame.Days:  # Дневной временной интервал (по умолчанию)
+            return DayCandleTimeFrame.DAYCANDLE_TIMEFRAME_D1
+        elif timeframe == TimeFrame.Weeks:  # Недельный временной интервал
+            return DayCandleTimeFrame.DAYCANDLE_TIMEFRAME_W1
+        raise NotImplementedError  # С остальными временнЫми интервалами не работаем
 
     @staticmethod
     def bt_timeframe_to_tf(timeframe, compression=1) -> str:
@@ -357,13 +392,9 @@ class FNData(with_metaclass(MetaFNData, AbstractDataBase)):
             return f'M{compression}'
         # Часовой график f'H{compression}' заменяем минутным. Пример: H1 = M60
         elif timeframe == TimeFrame.Days:  # Дневной временной интервал
-            return f'D1'
+            return 'D1'
         elif timeframe == TimeFrame.Weeks:  # Недельный временной интервал
-            return f'W1'
-        elif timeframe == TimeFrame.Months:  # Месячный временной интервал
-            return f'MN1'
-        elif timeframe == TimeFrame.Years:  # Годовой временной интервал
-            return f'Y1'
+            return 'W1'
         raise NotImplementedError  # С остальными временнЫми интервалами не работаем
 
     def get_bar_open_date_time(self, bar) -> datetime:
@@ -391,47 +422,6 @@ class FNData(with_metaclass(MetaFNData, AbstractDataBase)):
         elif self.p.timeframe == TimeFrame.Seconds:  # Секундный временной интервал
             return dt_open + timedelta(seconds=self.p.compression * period)  # Время закрытия бара
 
-    def is_bar_valid(self, bar) -> bool:
-        """Проверка бара на соответствие условиям выборки"""
-        dt_open = bar['datetime']  # Дата и время открытия бара МСК
-        if dt_open <= self.dt_last_open:  # Если пришел бар из прошлого (дата открытия меньше последней даты открытия)
-            self.logger.warning(f'Дата/время открытия бара {dt_open} <= последней даты/времени открытия {self.dt_last_open}')
-            return False  # то бар не соответствует условиям выборки
-        if self.p.fromdate and dt_open < self.p.fromdate or self.p.todate and dt_open > self.p.todate:  # Если задан диапазон, а бар за его границами
-            # self.logger.debug(f'Дата/время открытия бара {dt_open} за границами диапазона {self.p.fromdate} - {self.p.todate}')
-            self.dt_last_open = dt_open  # Запоминаем дату/время открытия пришедшего бара для будущих сравнений
-            return False  # то бар не соответствует условиям выборки
-        if self.p.sessionstart != datetime_time.min and dt_open.time() < self.p.sessionstart:  # Если задано время начала сессии и открытие бара до этого времени
-            self.logger.warning(f'Дата/время открытия бара {dt_open} до начала торговой сессии {self.p.sessionstart}')
-            self.dt_last_open = dt_open  # Запоминаем дату/время открытия пришедшего бара для будущих сравнений
-            return False  # то бар не соответствует условиям выборки
-        dt_close = self.get_bar_close_date_time(dt_open)  # Дата и время закрытия бара
-        if self.p.sessionend != datetime_time(23, 59, 59, 999990) and dt_close.time() > self.p.sessionend:  # Если задано время окончания сессии и закрытие бара после этого времени
-            self.logger.warning(f'Дата/время открытия бара {dt_open} после окончания торговой сессии {self.p.sessionend}')
-            self.dt_last_open = dt_open  # Запоминаем дату/время открытия пришедшего бара для будущих сравнений
-            return False  # то бар не соответствует условиям выборки
-        if not self.p.four_price_doji and bar['high'] == bar['low']:  # Если не пропускаем дожи 4-х цен, но такой бар пришел
-            self.logger.warning(f'Бар {dt_open} - дожи 4-х цен')
-            self.dt_last_open = dt_open  # Запоминаем дату/время открытия пришедшего бара для будущих сравнений
-            return False  # то бар не соответствует условиям выборки
-        time_market_now = self.get_finam_date_time_now()  # Текущее биржевое время
-        if dt_close > time_market_now and time_market_now.time() < self.p.sessionend:  # Если время закрытия бара еще не наступило на бирже, и сессия еще не закончилась
-            self.logger.warning(f'Дата/время {dt_close} закрытия бара на {dt_open} еще не наступило')
-            return False  # то бар не соответствует условиям выборки
-        self.dt_last_open = dt_open  # Запоминаем дату/время открытия пришедшего бара для будущих сравнений
-        return True  # В остальных случаях бар соответствуем условиям выборки
-
-    def save_bar_to_file(self, bar, writer=None) -> None:
-        """Сохранение бара в конец файла"""
-        if writer is not None:
-            get_writer = contextlib.nullcontext(writer)
-        else:
-            get_writer = self._with_history_bars_file_writer()
-
-        with get_writer as writer:
-            row = _csv_row_from_bar(self.symbol, bar)
-            writer.writerow(row)  # Записываем бар в конец файла
-
     @contextlib.contextmanager
     def _with_history_bars_file_writer(self) -> Generator[csv.DictWriter, None, None]:
         write_header = False
@@ -448,8 +438,7 @@ class FNData(with_metaclass(MetaFNData, AbstractDataBase)):
 
     def get_finam_date_time_now(self) -> datetime:
         """Текущая дата и время МСК"""
-        # TODO Получить текущее дату и время с Финама, когда появится в API
-        return datetime.now(self.store.provider.tz_msk).replace(tzinfo=None)
+        return datetime.now(self.store.provider.tz_msk).replace(tzinfo=None)  # TODO Получить текущее дату и время с Финама, когда появится в API
 
     def request_closed_bar(self, interval):
         time.sleep(0.5)
